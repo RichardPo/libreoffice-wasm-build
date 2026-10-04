@@ -15,17 +15,25 @@ LINKDEPS="$(find "$CORE/workdir" "$CORE/instdir" -name 'soffice*.linkdeps' | hea
 [ -n "$LINKDEPS" ] || { echo "no soffice .linkdeps found" >&2; exit 1; }
 echo "linkdeps: $LINKDEPS"
 
+# Library search path: LibreOffice's own output folders plus the -L directories in .linkdeps
+# (external libraries such as ICU or libxml2 live in workdir/UnpackedTarball/*).
+SEARCH=("$CORE/instdir/program" "$CORE/workdir/LinkTarget/Library" "$CORE/workdir/LinkTarget/StaticLibrary")
+for tok in $(cat "$LINKDEPS"); do
+  case "$tok" in -L*) SEARCH+=("${tok#-L}") ;; esac
+done
+
 {
   echo "$LINKDEPS"
   for tok in $(cat "$LINKDEPS"); do
     case "$tok" in
+      -L*) ;;
       -l*)
         name="${tok#-l}"
         found=""
-        for dir in "$CORE/instdir/program" "$CORE/workdir/LinkTarget/Library" "$CORE/workdir/LinkTarget/StaticLibrary"; do
+        for dir in "${SEARCH[@]}"; do
           if [ -f "$dir/lib$name.a" ]; then found="$dir/lib$name.a"; break; fi
         done
-        if [ -n "$found" ]; then echo "$found"; else echo "  (system library $tok)" >&2; fi
+        if [ -n "$found" ]; then echo "$found"; else echo "  (from Emscripten: $tok)" >&2; fi
         ;;
       /*.a) echo "$tok" ;;
       *.a) echo "$CORE/$tok" ;;
