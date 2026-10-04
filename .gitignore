@@ -1,0 +1,5 @@
+core/
+dist/
+.ccache/
+.tarballs/
+.DS_Store

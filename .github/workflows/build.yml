@@ -1,0 +1,253 @@
+name: Build headless LibreOffice WASM (LOK + UNO)
+
+# A full LibreOffice core build does not fit in one 6-hour GitHub-hosted job. The compiler cache
+# is therefore saved even when the build step times out, and the workflow then starts itself
+# again (`attempt` + 1) until the build finishes or `max_attempts` is reached.
+
+on:
+  workflow_dispatch:
+    inputs:
+      lo_ref:
+        description: LibreOffice core tag or branch (needs initJsUnoScripting in LOKit, i.e. 26.2 or newer)
+        default: libreoffice-26.8.1.1
+      wasm_module:
+        description: Office module to build (writer, calc or impress)
+        default: writer
+      attempt:
+        description: Internal, set by the workflow when it continues itself
+        default: "1"
+      max_attempts:
+        description: Maximum number of chained runs
+        default: "6"
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: build-${{ inputs.lo_ref }}-${{ inputs.wasm_module }}
+  cancel-in-progress: false
+
+env:
+  EMSDK_VERSION: 4.0.10
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 7G
+  CCACHE_COMPRESS: "true"
+  CCACHE_COMPRESSLEVEL: "6"
+  # Let emcc run clang through ccache (ccache does not recognise emcc itself).
+  EM_COMPILER_WRAPPER: ccache
+  EXT_TARBALLS: ${{ github.workspace }}/.tarballs
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    outputs:
+      complete: ${{ steps.result.outputs.complete }}
+      timed_out: ${{ steps.make.outputs.timed_out }}
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/local/.ghcup /usr/share/swift
+          sudo docker image prune --all --force > /dev/null || true
+          df -h /
+
+      - name: Add swap for linking soffice.wasm
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake bison build-essential ccache flex gettext git gperf libtool \
+            nasm pkg-config python3 python3-dev unzip xsltproc libxml2-utils zip
+
+      - uses: actions/checkout@v4
+        with:
+          path: build-repo
+
+      - name: Check out LibreOffice core ${{ inputs.lo_ref }}
+        run: |
+          git clone --depth 1 --branch "${{ inputs.lo_ref }}" https://github.com/LibreOffice/core.git core
+          git -C core log -1 --format='%H %cd %s'
+
+      - name: Set up Emscripten ${{ env.EMSDK_VERSION }}
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+          actions-cache-folder: emsdk-cache
+
+      - name: Check that the extra runtime exports exist in this Emscripten
+        # Fails in seconds instead of at the final link hours later.
+        run: |
+          printf 'int main(void){return 0;}\n' > /tmp/probe.c
+          emcc /tmp/probe.c -o /tmp/probe.js -pthread -sALLOW_TABLE_GROWTH=1 \
+            '-sEXPORTED_RUNTIME_METHODS=["addFunction","removeFunction","getWasmTableEntry","HEAPU8","HEAP32","stringToUTF8","lengthBytesUTF8","FS"]'
+          grep -q addFunction /tmp/probe.js
+
+      - name: Export LibreOfficeKit helpers to JavaScript
+        run: bash build-repo/scripts/patch-exports.sh core/solenv/gbuild/platform/EMSCRIPTEN_INTEL_GCC.mk
+
+      - name: Restore compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ inputs.lo_ref }}-${{ inputs.wasm_module }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ inputs.lo_ref }}-${{ inputs.wasm_module }}-
+            ccache-
+
+      - name: Restore external tarballs
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.EXT_TARBALLS }}
+          key: tarballs-${{ inputs.lo_ref }}
+          restore-keys: tarballs-
+
+      - name: Configure
+        working-directory: core
+        run: |
+          mkdir -p "$EXT_TARBALLS"
+          cat > autogen.input <<EOF
+          --host=wasm32-local-emscripten
+          --disable-gui
+          --with-wasm-module=${{ inputs.wasm_module }}
+          --with-package-format=emscripten
+          --disable-debug
+          --disable-crashdump
+          --disable-ccache
+          --disable-scripting
+          --without-java
+          --without-doxygen
+          --without-help
+          --without-junit
+          --with-external-tar=$EXT_TARBALLS
+          --with-parallelism=$(nproc)
+          EOF
+          sed -i 's/^ *//' autogen.input
+          cat autogen.input
+          ./autogen.sh
+
+      - name: Download external sources
+        working-directory: core
+        run: make fetch
+
+      - name: Save external tarballs
+        # Fixed key: saved once per LibreOffice version, so it does not crowd out the compiler cache.
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.EXT_TARBALLS }}
+          key: tarballs-${{ inputs.lo_ref }}
+
+      - name: Build
+        id: make
+        working-directory: core
+        # Stops itself well before the 6-hour job limit, so the cache can be saved and a new run
+        # can continue. A real build error fails the run instead.
+        run: |
+          ccache --zero-stats
+          set +e
+          timeout --kill-after=2m 285m make 2>&1 | tee ../build.log \
+            | grep -E --line-buffered '^\[build (LNK|PKG|MOD|ALL)\]|error:|Error '
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+            echo "timed_out=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Build stopped after the time budget; a new run continues from the cache."
+            exit 0
+          fi
+          tail -n 80 ../build.log
+          exit "$rc"
+
+      - name: Compiler cache statistics
+        if: always()
+        run: ccache --show-stats || true
+
+      - name: Save compiler cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ inputs.lo_ref }}-${{ inputs.wasm_module }}-${{ github.run_id }}
+
+      - name: Result
+        id: result
+        if: always()
+        run: |
+          OUT=core/workdir/installation/LibreOffice/emscripten
+          if [ -f "$OUT/soffice.wasm" ] && [ -f "$OUT/soffice.js" ]; then
+            echo "complete=true" >> "$GITHUB_OUTPUT"
+            ls -la "$OUT"
+          else
+            echo "complete=false" >> "$GITHUB_OUTPUT"
+            echo "Build not finished in this run."
+          fi
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-attempt-${{ inputs.attempt }}
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Check LOK and UNO exports
+        if: steps.result.outputs.complete == 'true'
+        run: bash build-repo/scripts/check-exports.sh core/workdir/installation/LibreOffice/emscripten/soffice.js
+
+      - name: Package
+        if: steps.result.outputs.complete == 'true'
+        run: |
+          NAME="libreoffice-wasm-${{ inputs.wasm_module }}-${{ inputs.lo_ref }}"
+          mkdir -p "dist/$NAME"
+          cp -r core/workdir/installation/LibreOffice/emscripten/. "dist/$NAME/"
+          git -C core log -1 --format='%H' > "dist/$NAME/LIBREOFFICE_COMMIT"
+          cp build-repo/README.md "dist/$NAME/"
+          (cd dist && tar -czf "$NAME.tar.gz" "$NAME")
+          echo "NAME=$NAME" >> "$GITHUB_ENV"
+          ls -la dist
+
+      - name: Upload artifact
+        if: steps.result.outputs.complete == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: dist/${{ env.NAME }}
+
+      - name: Publish release
+        if: steps.result.outputs.complete == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${NAME}-run${{ github.run_id }}"
+          gh release create "$TAG" "dist/$NAME.tar.gz" --repo "${{ github.repository }}" \
+            --title "$NAME" \
+            --notes "Headless LibreOffice (${{ inputs.wasm_module }}) built with Emscripten $EMSDK_VERSION from \`${{ inputs.lo_ref }}\` ($(cat "dist/$NAME/LIBREOFFICE_COMMIT")). Exports LibreOfficeKit and the Embind UNO bridge (zetajs)."
+
+  continue:
+    needs: build
+    if: always() && needs.build.outputs.timed_out == 'true' && !cancelled()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Start the next run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NEXT=$(( ${{ inputs.attempt }} + 1 ))
+          if [ "$NEXT" -gt "${{ inputs.max_attempts }}" ]; then
+            echo "::error::Build did not finish within ${{ inputs.max_attempts }} runs."
+            exit 1
+          fi
+          # A workflow_dispatch from GITHUB_TOKEN is allowed to start a new run.
+          gh workflow run build.yml --repo "${{ github.repository }}" --ref "${{ github.ref_name }}" \
+            -f lo_ref="${{ inputs.lo_ref }}" -f wasm_module="${{ inputs.wasm_module }}" \
+            -f attempt="$NEXT" -f max_attempts="${{ inputs.max_attempts }}"
+          echo "Started attempt $NEXT"
