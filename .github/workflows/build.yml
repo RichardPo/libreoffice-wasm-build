@@ -211,6 +211,9 @@ jobs:
     needs: core
     if: always() && (inputs.core_run_id != '' || needs.core.outputs.complete == 'true')
     runs-on: ubuntu-24.04
+    env:
+      # One small compile; no ccache in this job.
+      EM_COMPILER_WRAPPER: ""
     steps:
       - uses: actions/checkout@v4
         with:
