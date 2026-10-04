@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Fails if the built soffice.js does not expose what a LibreOfficeKit client needs.
+# Fails if lokjs.js does not expose what the JavaScript client needs.
 set -euo pipefail
 
-JS="${1:?path to soffice.js}"
+JS="${1:?path to lokjs.js}"
 missing=0
-for sym in _libreofficekit_hook _libreofficekit_hook_2 addFunction wasmTable HEAPU8 stringToUTF8 FS; do
-  if grep -q "Module\[\"${sym}\"\]\|Module\['${sym}'\]\|\"${sym}\"" "$JS"; then
-    echo "ok       $sym"
-  else
-    echo "MISSING  $sym"
-    missing=1
-  fi
+check() {
+  if grep -q "$2" "$JS"; then echo "ok       $1"; else echo "MISSING  $1"; missing=1; fi
+}
+for fn in _lokjs_state _lokjs_document_load _lokjs_paint_tile _lokjs_post_key _lokjs_post_mouse _lokjs_post_uno _malloc _free; do
+  check "$fn" "Module\[\"$fn\"\]\|var $fn ="
 done
-# The Embind UNO bridge that zetajs builds on:
-if grep -q "uno_Type" "$JS"; then echo "ok       Embind UNO bindings"; else echo "MISSING  Embind UNO bindings"; missing=1; fi
+for rt in HEAPU8 HEAP32 stringToUTF8 lengthBytesUTF8 UTF8ToString FS ccall; do
+  check "$rt (runtime)" "Module\[\"$rt\"\]"
+done
+check "Embind UNO bindings (zetajs)" "uno_Type"
+check "Module.lokCallback bridge" "lokCallback"
 exit $missing

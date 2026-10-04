@@ -1,20 +1,27 @@
-name: Build headless LibreOffice WASM (LOK + UNO)
+name: Build LibreOffice WASM with lokjs
 
-# A full LibreOffice core build does not fit in one 6-hour GitHub-hosted job. The compiler cache
-# is therefore saved even when the build step times out, and the workflow then starts itself
-# again (`attempt` + 1) until the build finishes or `max_attempts` is reached.
+# 1. core      LibreOffice core from an official tag, unmodified, headless WASM. Afterwards the
+#              "link kit" (libraries, export list, JS glue, soffice.data) is kept as an artifact.
+# 2. lokjs     src/lokjs.c (own main() starting LibreOfficeKit) linked against that kit.
+#              With `core_run_id` the kit of an earlier run is reused and `core` is skipped, so a
+#              change to lokjs.c takes minutes instead of hours.
+# 3. continue  A cold core build may not fit in one 6-hour job: the compiler cache is saved and
+#              the workflow starts itself again until the build is done (max `max_attempts`).
 
 on:
   workflow_dispatch:
     inputs:
       lo_ref:
-        description: LibreOffice core tag or branch (needs initJsUnoScripting in LOKit, i.e. 26.2 or newer)
+        description: LibreOffice core tag (26.2 or newer; LOK starts the JS UNO bridge since then)
         default: libreoffice-26.8.1.1
       wasm_module:
-        description: Office module to build (writer, calc or impress)
+        description: Office module (writer, calc or impress)
         default: writer
+      core_run_id:
+        description: Reuse the link kit of this earlier run and skip building LibreOffice
+        default: ""
       attempt:
-        description: Internal, set by the workflow when it continues itself
+        description: Internal, set when the workflow continues itself
         default: "1"
       max_attempts:
         description: Maximum number of chained runs
@@ -37,9 +44,11 @@ env:
   # Let emcc run clang through ccache (ccache does not recognise emcc itself).
   EM_COMPILER_WRAPPER: ccache
   EXT_TARBALLS: ${{ github.workspace }}/.tarballs
+  KIT_NAME: link-kit-${{ inputs.lo_ref }}-${{ inputs.wasm_module }}
 
 jobs:
-  build:
+  core:
+    if: inputs.core_run_id == ''
     runs-on: ubuntu-24.04
     timeout-minutes: 355
     outputs:
@@ -53,21 +62,20 @@ jobs:
           sudo docker image prune --all --force > /dev/null || true
           df -h /
 
-      - name: Add swap for linking soffice.wasm
+      - name: Add swap for linking
         run: |
           sudo swapoff -a || true
           sudo fallocate -l 16G /mnt/swapfile
           sudo chmod 600 /mnt/swapfile
           sudo mkswap /mnt/swapfile
           sudo swapon /mnt/swapfile
-          free -h
 
       - name: Install build tools
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             autoconf automake bison build-essential ccache flex gettext git gperf libtool \
-            nasm pkg-config python3 python3-dev unzip xsltproc libxml2-utils zip
+            nasm pkg-config python3 python3-dev unzip xsltproc libxml2-utils zip zstd
 
       - uses: actions/checkout@v4
         with:
@@ -84,17 +92,6 @@ jobs:
           version: ${{ env.EMSDK_VERSION }}
           actions-cache-folder: emsdk-cache
 
-      - name: Check that the extra runtime exports exist in this Emscripten
-        # Fails in seconds instead of at the final link hours later.
-        run: |
-          printf 'int main(void){return 0;}\n' > /tmp/probe.c
-          emcc /tmp/probe.c -o /tmp/probe.js -pthread -sALLOW_TABLE_GROWTH=1 \
-            '-sEXPORTED_RUNTIME_METHODS=["addFunction","removeFunction","wasmTable","HEAPU8","HEAP32","stringToUTF8","lengthBytesUTF8","FS"]'
-          grep -q addFunction /tmp/probe.js
-
-      - name: Export LibreOfficeKit helpers to JavaScript
-        run: bash build-repo/scripts/patch-exports.sh core/solenv/gbuild/platform/EMSCRIPTEN_INTEL_GCC.mk
-
       - name: Restore compiler cache
         uses: actions/cache/restore@v4
         with:
@@ -104,7 +101,7 @@ jobs:
             ccache-${{ inputs.lo_ref }}-${{ inputs.wasm_module }}-
             ccache-
 
-      - name: Restore external tarballs
+      - name: Restore external sources
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.EXT_TARBALLS }}
@@ -139,7 +136,7 @@ jobs:
         working-directory: core
         run: make fetch
 
-      - name: Save external tarballs
+      - name: Save external sources
         # Fixed key: saved once per LibreOffice version, so it does not crowd out the compiler cache.
         continue-on-error: true
         uses: actions/cache/save@v4
@@ -147,7 +144,7 @@ jobs:
           path: ${{ env.EXT_TARBALLS }}
           key: tarballs-${{ inputs.lo_ref }}
 
-      - name: Build
+      - name: Build LibreOffice
         id: make
         working-directory: core
         # Stops itself well before the 6-hour job limit, so the cache can be saved and a new run
@@ -182,13 +179,11 @@ jobs:
         id: result
         if: always()
         run: |
-          OUT=core/workdir/installation/LibreOffice/emscripten
-          if [ -f "$OUT/soffice.wasm" ] && [ -f "$OUT/soffice.js" ]; then
+          if [ -f core/instdir/program/soffice.data ] && find core/workdir core/instdir -name 'soffice*.linkdeps' | grep -q .; then
             echo "complete=true" >> "$GITHUB_OUTPUT"
-            ls -la "$OUT"
           else
             echo "complete=false" >> "$GITHUB_OUTPUT"
-            echo "Build not finished in this run."
+            echo "LibreOffice not finished in this run."
           fi
 
       - name: Upload build log
@@ -199,42 +194,81 @@ jobs:
           path: build.log
           if-no-files-found: ignore
 
-      - name: Check LOK and UNO exports
+      - name: Collect link kit
         if: steps.result.outputs.complete == 'true'
-        run: bash build-repo/scripts/check-exports.sh core/workdir/installation/LibreOffice/emscripten/soffice.js
+        run: bash build-repo/scripts/collect-link-kit.sh core "$KIT_NAME.tar.zst"
 
-      - name: Package
-        if: steps.result.outputs.complete == 'true'
-        run: |
-          NAME="libreoffice-wasm-${{ inputs.wasm_module }}-${{ inputs.lo_ref }}"
-          mkdir -p "dist/$NAME"
-          cp -r core/workdir/installation/LibreOffice/emscripten/. "dist/$NAME/"
-          git -C core log -1 --format='%H' > "dist/$NAME/LIBREOFFICE_COMMIT"
-          cp build-repo/README.md "dist/$NAME/"
-          (cd dist && tar -czf "$NAME.tar.gz" "$NAME")
-          echo "NAME=$NAME" >> "$GITHUB_ENV"
-          ls -la dist
-
-      - name: Upload artifact
+      - name: Upload link kit
         if: steps.result.outputs.complete == 'true'
         uses: actions/upload-artifact@v4
         with:
+          name: ${{ env.KIT_NAME }}
+          path: ${{ env.KIT_NAME }}.tar.zst
+          compression-level: 0
+          retention-days: 90
+
+  lokjs:
+    needs: core
+    if: always() && (inputs.core_run_id != '' || needs.core.outputs.complete == 'true')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: build-repo
+
+      - name: Set up Emscripten ${{ env.EMSDK_VERSION }}
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+          actions-cache-folder: emsdk-cache
+
+      - name: Download link kit
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.KIT_NAME }}
+          run-id: ${{ inputs.core_run_id || github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Unpack link kit
+        run: |
+          zstd -d -c "$KIT_NAME.tar.zst" | sudo tar -C / -xf -
+          sudo chown -R "$USER" core
+          du -sh core
+
+      - name: Compile and link lokjs
+        run: bash build-repo/scripts/link-lokjs.sh core dist/lokjs
+
+      - name: Check exports
+        run: bash build-repo/scripts/check-exports.sh dist/lokjs/lokjs.js
+
+      - name: Package
+        run: |
+          NAME="lokjs-${{ inputs.wasm_module }}-${{ inputs.lo_ref }}"
+          cp build-repo/README.md dist/lokjs/
+          git -C build-repo rev-parse HEAD > dist/lokjs/LOKJS_COMMIT
+          echo "${{ inputs.lo_ref }}" > dist/lokjs/LIBREOFFICE_REF
+          (cd dist && tar -czf "$NAME.tar.gz" lokjs)
+          echo "NAME=$NAME" >> "$GITHUB_ENV"
+          ls -la dist dist/lokjs
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
           name: ${{ env.NAME }}
-          path: dist/${{ env.NAME }}
+          path: dist/lokjs
 
       - name: Publish release
-        if: steps.result.outputs.complete == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${NAME}-run${{ github.run_id }}"
           gh release create "$TAG" "dist/$NAME.tar.gz" --repo "${{ github.repository }}" \
             --title "$NAME" \
-            --notes "Headless LibreOffice (${{ inputs.wasm_module }}) built with Emscripten $EMSDK_VERSION from \`${{ inputs.lo_ref }}\` ($(cat "dist/$NAME/LIBREOFFICE_COMMIT")). Exports LibreOfficeKit and the Embind UNO bridge (zetajs)."
+            --notes "lokjs (LibreOfficeKit + Embind UNO for JavaScript), linked against unmodified LibreOffice \`${{ inputs.lo_ref }}\` (${{ inputs.wasm_module }}), Emscripten $EMSDK_VERSION. Contents: lokjs.js, lokjs.wasm, soffice.data, soffice.data.js.metadata."
 
   continue:
-    needs: build
-    if: always() && needs.build.outputs.timed_out == 'true' && !cancelled()
+    needs: core
+    if: always() && needs.core.outputs.timed_out == 'true' && !cancelled()
     runs-on: ubuntu-24.04
     steps:
       - name: Start the next run

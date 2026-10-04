@@ -1,60 +1,56 @@
 # libreoffice-wasm-build
 
-GitHub Actions build of **headless LibreOffice as WebAssembly**, for a browser client that draws the
-document itself. The build contains both:
+GitHub Actions build of **LibreOffice as WebAssembly for a browser client that draws the document
+itself**. LibreOffice is built from an official tag **without any changes**; on top of it this repo
+links `lokjs`, a small program that starts LibreOffice in LibreOfficeKit mode and gives
+JavaScript a plain C API.
 
-- **LibreOfficeKit (LOK)**: tiles (`paintTile`), input (`postKeyEvent`, `postMouseEvent`) and
-  callbacks (invalidated areas, cursor, selection, `.uno:` states, comments, ruler), like
-  Collabora Online uses;
+The result offers in one WASM module:
+
+- **LibreOfficeKit (LOK):** tiles (`paintTile`), input (keys, mouse, IME) and callbacks
+  (invalidated areas, cursor, selection, `.uno:` states, comments, ruler), the way Collabora
+  Online uses LibreOffice;
 - **the Embind UNO bridge** that [zetajs](https://github.com/allotropia/zetajs) builds on, for
-  working with the document model from JavaScript.
+  working with the document model from JavaScript. Since LibreOffice 26.2, LOK starts that bridge
+  during its own initialisation (`initJsUnoScripting()` in `desktop/source/lib/init.cxx`, commit
+  `0b10ff07`), so zetajs scripts in `Module.uno_scripts` load just as in a regular build.
 
-Since LibreOffice 26.2, LOK starts the JavaScript UNO bridge during its own initialisation
-(`initJsUnoScripting()` in `desktop/source/lib/init.cxx`, commit `0b10ff07`, "Emscripten: Call
-initJsUnoScripting also from LOKit"), so zetajs scripts in `Module.uno_scripts` load in a LOK build
-just as they do in the Qt build. Older versions (25.8 and earlier) do not have this.
+## Why a separate program
 
-## What the workflow does
+LOK has to start LibreOffice itself (UNO, VCL, the main loop); it cannot attach to an
+already running `soffice`. LibreOffice's own `soffice.js` therefore cannot be used for LOK, and
+its sources are not touched here either. Instead `src/lokjs.c` has its own `main()`:
 
-| Step | |
+1. `SAL_LOK_OPTIONS=unipoll` (LOK without its own main thread);
+2. `libreofficekit_hook_2()` initialises LibreOffice — and with it the zetajs scripts;
+3. `runLoop()` hands LibreOffice's main loop to the browser's event loop (Emscripten
+   `emscripten_set_main_loop`), on the same thread.
+
+JavaScript on that thread then calls the `lokjs_*` functions between main-loop iterations, and
+receives LOK callbacks in `Module.lokCallback(doc, type, payload)`. This is the same structure
+Collabora uses for its WASM build (own `main()`, linked against LibreOffice's libraries).
+
+LibreOffice's build writes the complete list of libraries for linking `soffice` to
+`soffice.js.linkdeps`; `scripts/link-lokjs.sh` links `lokjs.c` against exactly that list, with
+the same flags LibreOffice uses for `soffice` plus the runtime helpers a JS client needs
+(`HEAPU8`, `HEAP32`, `stringToUTF8`, `lengthBytesUTF8`, `FS`).
+
+## The workflow
+
+| Job | |
 | --- | --- |
-| Source | `LibreOffice/core` at a tag (default `libreoffice-26.8.1.1`), shallow clone |
-| Toolchain | Emscripten 4.0.10 (the version LibreOffice's `static/README.wasm.md` uses) |
-| Configure | `--host=wasm32-local-emscripten --disable-gui --with-wasm-module=writer --with-package-format=emscripten` (+ no Java, help, scripting frameworks, crash reporter) |
-| Patch | `scripts/patch-exports.sh` exports the runtime helpers a LOK client needs (see below) |
-| Build | `make`, with ccache through `EM_COMPILER_WRAPPER` |
-| Output | `workdir/installation/LibreOffice/emscripten/` (`soffice.js`, `soffice.wasm`, `soffice.data`, …) as artifact and GitHub Release |
-
-### Exported to JavaScript
-
-LibreOffice already exports `_libreofficekit_hook` / `_libreofficekit_hook_2` (returns the
-`LibreOfficeKit*`). Its function-pointer structs can only be used from JS with a few more runtime
-helpers, which the patch adds:
-
-| Export | Used for |
-| --- | --- |
-| `addFunction`, `removeFunction` (+ `ALLOW_TABLE_GROWTH`) | a JS function as C callback (`registerCallback`) |
-| `wasmTable` | calling the function pointers in `LibreOfficeKitClass` / `LibreOfficeKitDocumentClass` (`wasmTable.get(ptr)`; `getWasmTableEntry` cannot be exported in Emscripten 4.0) |
-| `HEAPU8`, `HEAP32` | reading structs and tile pixels |
-| `stringToUTF8`, `lengthBytesUTF8` | passing URLs and JSON arguments |
-| `FS` | putting documents into and out of the in-memory file system |
-
-`scripts/check-exports.sh` verifies the result, including the Embind UNO bindings.
-
-### Running for longer than 6 hours
-
-A cold build takes longer than one GitHub-hosted job may run (4 cores). The build step therefore stops
-itself after ~4¾ hours, the compiler cache is saved, and the workflow starts a new run (`attempt` + 1)
-that continues from the cache. That repeats until the build is done or `max_attempts` (default 6) is
-reached. A real build error stops the chain.
-
-Start a build: **Actions → Build headless LibreOffice WASM → Run workflow**, or
+| `core` | LibreOffice core at a tag (default `libreoffice-26.8.1.1`), Emscripten 4.0.10, `--host=wasm32-local-emscripten --disable-gui --with-wasm-module=writer --with-package-format=emscripten`. Keeps a **link kit** as artifact (libraries, export list, JS glue, LOK headers, `soffice.data`). |
+| `lokjs` | Compiles `src/lokjs.c`, links it against the link kit, checks the exports, publishes `lokjs.js`, `lokjs.wasm`, `soffice.data`, `soffice.data.js.metadata` as artifact and GitHub Release. |
+| `continue` | If `core` reached its time budget (~4¾ h), the compiler cache is saved and a new run continues (up to `max_attempts`). A real build error stops the chain. |
 
 ```sh
+# full build
 gh workflow run build.yml -f lo_ref=libreoffice-26.8.1.1 -f wasm_module=writer
+# only relink lokjs against the LibreOffice of an earlier run (minutes)
+gh workflow run build.yml -f core_run_id=<run id>
 ```
 
-## Using the result
+## Using lokjs from JavaScript
 
 Serve the files with these headers (SharedArrayBuffer):
 
@@ -63,22 +59,26 @@ Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Embedder-Policy: require-corp
 ```
 
-`soffice.js` expects a global `Module` before it loads; `Module.uno_scripts` lists the zetajs scripts
-(`zeta.js` first). Initialising LOK and drawing tiles is the client's job; a sketch, not yet tested
-against this build:
+`lokjs.js` expects a global `Module` before it loads; `Module.uno_scripts` lists the scripts that
+run on LibreOffice's thread (`zeta.js` first). In such a script:
 
 ```js
-// LibreOfficeKit* lok = libreofficekit_hook_2(install_path, user_profile_url)
-const lok = Module._libreofficekit_hook_2(cstr('/instdir/program'), 0)
-const cls = Module.HEAP32[lok >> 2]                       // LibreOfficeKitClass*
-const fn = (struct, index) => Module.wasmTable.get(Module.HEAP32[(struct >> 2) + index])
-// …documentLoad, initializeForRendering, registerCallback(addFunction(cb, 'viiii')), paintTile…
+Module.lokReady = () => {                       // main loop is running
+  const doc = Module.ccall('lokjs_document_load', 'number', ['string', 'string'],
+                           ['file:///tmp/doc.odt', ''])
+  Module.ccall('lokjs_initialize_for_rendering', null, ['number', 'string'], [doc, '{}'])
+  Module.ccall('lokjs_register_callback', null, ['number'], [doc])
+  const buf = Module._malloc(256 * 256 * 4)
+  Module._lokjs_paint_tile(doc, buf, 256, 256, 0, 0, 3840, 3840)   // twips
+  const pixels = Module.HEAPU8.slice(buf, buf + 256 * 256 * 4)    // BGRA, see lokjs_get_tile_mode
+}
+Module.lokCallback = (doc, type, payload) => { /* LibreOfficeKitEnums.h: LOK_CALLBACK_* */ }
 ```
 
-The member order of the structs is in `include/LibreOfficeKit/LibreOfficeKit.h` of the built
-LibreOffice version (the first member of each class struct is `size_t nSize`).
+Functions return strings allocated by LibreOffice; release those with `lokjs_free`.
 
 ## Licences
 
-The workflow and scripts in this repository: MIT (see `LICENSE`). LibreOffice itself: MPL 2.0, with
-parts under other licences; the release archives contain the built LibreOffice files.
+`src/lokjs.c`: MPL 2.0 (like LibreOffice). Workflow and scripts: MIT (see `LICENSE`).
+LibreOffice itself: MPL 2.0, with parts under other licences; the release archives contain built
+LibreOffice files.
