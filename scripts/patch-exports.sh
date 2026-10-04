@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Exports the Emscripten runtime helpers a JavaScript client needs to drive LibreOfficeKit:
 #   addFunction/removeFunction  turn a JS function into a C function pointer (LOK callbacks)
-#   getWasmTableEntry           call the function pointers in the LibreOfficeKit structs
+#   wasmTable                   call the function pointers in the LibreOfficeKit structs
+#                               (wasmTable.get(ptr); getWasmTableEntry is not exportable in 4.x)
 #   HEAPU8/HEAP32               read tiles and structs from WASM memory
 #   stringToUTF8/lengthBytesUTF8  pass strings (URLs, JSON arguments) to LOK
 #   FS                          put documents into / take them out of the virtual file system
@@ -9,7 +10,7 @@
 set -euo pipefail
 
 MK="${1:?path to solenv/gbuild/platform/EMSCRIPTEN_INTEL_GCC.mk}"
-EXTRA='"addFunction","removeFunction","getWasmTableEntry","HEAPU8","HEAP32","stringToUTF8","lengthBytesUTF8","FS",'
+EXTRA='"addFunction","removeFunction","wasmTable","HEAPU8","HEAP32","stringToUTF8","lengthBytesUTF8","FS",'
 
 grep -q 'EXPORTED_RUNTIME_METHODS=\[' "$MK" || { echo "EXPORTED_RUNTIME_METHODS not found in $MK" >&2; exit 1; }
 if grep -q '"addFunction"' "$MK"; then

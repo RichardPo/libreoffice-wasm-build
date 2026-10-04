@@ -89,7 +89,7 @@ jobs:
         run: |
           printf 'int main(void){return 0;}\n' > /tmp/probe.c
           emcc /tmp/probe.c -o /tmp/probe.js -pthread -sALLOW_TABLE_GROWTH=1 \
-            '-sEXPORTED_RUNTIME_METHODS=["addFunction","removeFunction","getWasmTableEntry","HEAPU8","HEAP32","stringToUTF8","lengthBytesUTF8","FS"]'
+            '-sEXPORTED_RUNTIME_METHODS=["addFunction","removeFunction","wasmTable","HEAPU8","HEAP32","stringToUTF8","lengthBytesUTF8","FS"]'
           grep -q addFunction /tmp/probe.js
 
       - name: Export LibreOfficeKit helpers to JavaScript

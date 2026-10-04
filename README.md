@@ -34,7 +34,7 @@ helpers, which the patch adds:
 | Export | Used for |
 | --- | --- |
 | `addFunction`, `removeFunction` (+ `ALLOW_TABLE_GROWTH`) | a JS function as C callback (`registerCallback`) |
-| `getWasmTableEntry` | calling the function pointers in `LibreOfficeKitClass` / `LibreOfficeKitDocumentClass` |
+| `wasmTable` | calling the function pointers in `LibreOfficeKitClass` / `LibreOfficeKitDocumentClass` (`wasmTable.get(ptr)`; `getWasmTableEntry` cannot be exported in Emscripten 4.0) |
 | `HEAPU8`, `HEAP32` | reading structs and tile pixels |
 | `stringToUTF8`, `lengthBytesUTF8` | passing URLs and JSON arguments |
 | `FS` | putting documents into and out of the in-memory file system |
@@ -71,7 +71,7 @@ against this build:
 // LibreOfficeKit* lok = libreofficekit_hook_2(install_path, user_profile_url)
 const lok = Module._libreofficekit_hook_2(cstr('/instdir/program'), 0)
 const cls = Module.HEAP32[lok >> 2]                       // LibreOfficeKitClass*
-const fn = (struct, index) => Module.getWasmTableEntry(Module.HEAP32[(struct >> 2) + index])
+const fn = (struct, index) => Module.wasmTable.get(Module.HEAP32[(struct >> 2) + index])
 // …documentLoad, initializeForRendering, registerCallback(addFunction(cb, 'viiii')), paintTile…
 ```
 

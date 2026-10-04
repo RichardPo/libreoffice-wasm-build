@@ -4,7 +4,7 @@ set -euo pipefail
 
 JS="${1:?path to soffice.js}"
 missing=0
-for sym in _libreofficekit_hook _libreofficekit_hook_2 addFunction getWasmTableEntry HEAPU8 stringToUTF8 FS; do
+for sym in _libreofficekit_hook _libreofficekit_hook_2 addFunction wasmTable HEAPU8 stringToUTF8 FS; do
   if grep -q "Module\[\"${sym}\"\]\|Module\['${sym}'\]\|\"${sym}\"" "$JS"; then
     echo "ok       $sym"
   else
