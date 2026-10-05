@@ -16,6 +16,7 @@ WD="$CORE/workdir"
 COMMON=(-pthread -sUSE_PTHREADS=1 -sSUPPORT_LONGJMP=wasm -fwasm-exceptions -D_LARGEFILE64_SOURCE -D_LARGEFILE_SOURCE)
 
 emcc "${COMMON[@]}" -O2 -I"$CORE/include" -c "$SRC/lokjs.c" -o "$WORK/lokjs.o"
+OBJECTS=("$WORK/lokjs.o")
 
 # soffice's export list (main, libreofficekit_hook*, UNO bridge entry points) plus ours.
 cp "$WD/CustomTarget/desktop/soffice_bin-emscripten-exports/exports" "$WORK/exports"
@@ -31,6 +32,12 @@ RUNTIME='["UTF16ToString","stringToUTF16","UTF8ToString","ccall","cwrap","addOnP
 # LOKJS_PROFILING_FUNCS=1 keeps function names in the wasm, for readable stacks in DevTools.
 EXTRA_LINK=()
 if [ "${LOKJS_PROFILING_FUNCS:-0}" = 1 ]; then EXTRA_LINK+=(--profiling-funcs); fi
+# LOKJS_TRACE=1 adds src/lokjs-trace.c, which wraps LibreOffice entry points (linker --wrap).
+if [ "${LOKJS_TRACE:-0}" = 1 ]; then
+  emcc "${COMMON[@]}" -O2 -c "$SRC/lokjs-trace.c" -o "$WORK/lokjs-trace.o"
+  OBJECTS+=("$WORK/lokjs-trace.o")
+  EXTRA_LINK+=(-Wl,--wrap=soffice_main -Wl,--wrap=_ZN11Application7ExecuteEv)
+fi
 
 em++ "${COMMON[@]}" "${EXTRA_LINK[@]}" \
   -sTOTAL_MEMORY=1GB -sSTACK_SIZE=131072 -sDEFAULT_PTHREAD_STACK_SIZE=65536 \
@@ -45,7 +52,7 @@ em++ "${COMMON[@]}" "${EXTRA_LINK[@]}" \
   --pre-js "$CORE/static/emscripten/script.js" \
   --post-js "$WD/CustomTarget/static/unoembind/bindings_uno.js" \
   --post-js "$CORE/static/emscripten/uno.js" \
-  "$WORK/lokjs.o" \
+  "${OBJECTS[@]}" \
   -Wl,--whole-archive "$WD/LinkTarget/StaticLibrary/libunoembind.a" -Wl,--no-whole-archive \
   -L"$CORE/instdir/program" -L"$WD/LinkTarget/Library" -L"$WD/LinkTarget/StaticLibrary" \
   -Wl,--start-group $(cat "$LINKDEPS") -Wl,--end-group \

@@ -30,6 +30,10 @@ on:
         description: Keep function names in lokjs.wasm (readable stacks in DevTools, ~10 MB larger)
         type: boolean
         default: false
+      trace:
+        description: Link src/lokjs-trace.c (logs LibreOffice startup to the console)
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -261,6 +265,7 @@ jobs:
       - name: Compile and link lokjs
         env:
           LOKJS_PROFILING_FUNCS: ${{ inputs.profiling_funcs && '1' || '0' }}
+          LOKJS_TRACE: ${{ inputs.trace && '1' || '0' }}
         run: bash build-repo/scripts/link-lokjs.sh core dist/lokjs
 
       - name: Package
