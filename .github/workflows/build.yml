@@ -12,8 +12,8 @@ on:
   workflow_dispatch:
     inputs:
       lo_ref:
-        description: LibreOffice core tag (26.2 or newer; LOK starts the JS UNO bridge since then)
-        default: libreoffice-26.8.1.1
+        description: LibreOffice core tag (26.2.x; see README for why not 26.8)
+        default: libreoffice-26.2.6.3
       wasm_module:
         description: Office module (writer, calc or impress)
         default: writer

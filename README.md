@@ -39,16 +39,32 @@ the same flags LibreOffice uses for `soffice` plus the runtime helpers a JS clie
 
 | Job | |
 | --- | --- |
-| `core` | LibreOffice core at a tag (default `libreoffice-26.8.1.1`), Emscripten 4.0.10, `--host=wasm32-local-emscripten --disable-gui --with-wasm-module=writer --with-package-format=emscripten`. Keeps a **link kit** as artifact (libraries, export list, JS glue, LOK headers, `soffice.data`). |
+| `core` | LibreOffice core at a tag (default `libreoffice-26.2.6.3`, see below), Emscripten 4.0.10, `--host=wasm32-local-emscripten --disable-gui --with-wasm-module=writer --with-package-format=emscripten`. Keeps a **link kit** as artifact (libraries, export list, JS glue, LOK headers, `soffice.data`). |
 | `lokjs` | Compiles `src/lokjs.c`, links it against the link kit, checks the exports, publishes `lokjs.js`, `lokjs.wasm`, `soffice.data`, `soffice.data.js.metadata` as artifact and GitHub Release. |
 | `continue` | If `core` reached its time budget (~4¾ h), the compiler cache is saved and a new run continues (up to `max_attempts`). A real build error stops the chain. |
 
 ```sh
 # full build
-gh workflow run build.yml -f lo_ref=libreoffice-26.8.1.1 -f wasm_module=writer
+gh workflow run build.yml -f lo_ref=libreoffice-26.2.6.3 -f wasm_module=writer
 # only relink lokjs against the LibreOffice of an earlier run (minutes)
 gh workflow run build.yml -f core_run_id=<run id>
 ```
+
+## Which LibreOffice version
+
+**26.2.x.** It is the first series in which LOK starts the JS UNO bridge, and it does not yet have
+a change that breaks LOK's single-threaded ("unipoll") mode:
+
+- In 26.8, `ImplSVMain()` (vcl/source/app/svmain.cxx) returns immediately when VCL is already
+  initialised (commit "vcl: osx: clean up macOS nested ImplSVMain() hacks", 27 Feb 2026).
+  In unipoll mode `lo_initialize()` has initialised VCL already, so `runLoop()` → `soffice_main()`
+  returns at once: the desktop and the main loop never start, `main()` ends, and the SolarMutex
+  stays held by a thread that no longer exists — every later LOK or UNO call blocks forever.
+- 26.2 still runs `Application::Main()` in that case (`bWasInitVCL || InitVCL()`), as does
+  Collabora's fork.
+
+`src/lokjs.c` reports this situation (`lokjs_state() == -1`, "runLoop() returned" in the
+console). `trace=true` links `src/lokjs-trace.c`, which logs `soffice_main()`'s result.
 
 ## Using lokjs from JavaScript
 
