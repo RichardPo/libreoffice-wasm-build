@@ -22,7 +22,9 @@
 LibreOfficeKit* libreofficekit_hook_2(const char* install_path, const char* user_profile_path);
 
 static LibreOfficeKit* g_lok;
-/* 0 = not started, 1 = LOK initialised, 2 = main loop running (documents can be loaded) */
+/* 0 = not started, 1 = LOK initialised, 2 = main loop running (documents can be loaded),
+   -1 = runLoop() returned: LibreOffice's desktop exited instead of handing its main loop to
+   the browser, so VCL is shut down and nothing can be loaded. */
 static int g_state;
 
 /* LibreOffice's Emscripten main loop calls this ~100 times a second (ImplYield). Input comes from
@@ -65,6 +67,8 @@ static void lokjs_document_callback(int type, const char* payload, void* data)
 static void lokjs_notify_ready(void* arg)
 {
     (void)arg;
+    if (g_state != 1)
+        return;
     g_state = 2;
     EM_ASM({ if (typeof Module.lokReady === 'function') Module.lokReady(); });
 }
@@ -83,6 +87,8 @@ int main(int argc, char** argv)
     emscripten_async_call(lokjs_notify_ready, NULL, 0);
     /* Runs soffice_main(), which ends in emscripten_set_main_loop_arg() and does not return. */
     g_lok->pClass->runLoop(g_lok, lokjs_poll, lokjs_wake, g_lok);
+    g_state = -1;
+    EM_ASM({ console.error('lokjs: runLoop() returned; LibreOffice is not running'); });
     return 0;
 }
 
