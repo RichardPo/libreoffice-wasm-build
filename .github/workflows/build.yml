@@ -26,6 +26,10 @@ on:
       max_attempts:
         description: Maximum number of chained runs
         default: "6"
+      profiling_funcs:
+        description: Keep function names in lokjs.wasm (readable stacks in DevTools, ~10 MB larger)
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -255,6 +259,8 @@ jobs:
           du -sh core
 
       - name: Compile and link lokjs
+        env:
+          LOKJS_PROFILING_FUNCS: ${{ inputs.profiling_funcs && '1' || '0' }}
         run: bash build-repo/scripts/link-lokjs.sh core dist/lokjs
 
       - name: Package
@@ -302,5 +308,6 @@ jobs:
           # A workflow_dispatch from GITHUB_TOKEN is allowed to start a new run.
           gh workflow run build.yml --repo "${{ github.repository }}" --ref "${{ github.ref_name }}" \
             -f lo_ref="${{ inputs.lo_ref }}" -f wasm_module="${{ inputs.wasm_module }}" \
-            -f attempt="$NEXT" -f max_attempts="${{ inputs.max_attempts }}"
+            -f attempt="$NEXT" -f max_attempts="${{ inputs.max_attempts }}" \
+            -f profiling_funcs="${{ inputs.profiling_funcs }}"
           echo "Started attempt $NEXT"

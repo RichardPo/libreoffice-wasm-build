@@ -28,7 +28,11 @@ cp "$WD/CustomTarget/desktop/soffice_bin-emscripten-exports/exports" "$WORK/expo
 
 RUNTIME='["UTF16ToString","stringToUTF16","UTF8ToString","ccall","cwrap","addOnPreMain","addOnPostRun","registerType","throwBindingError","ClassHandle","HEAPU16","HEAPU32","HEAPU8","HEAP32","stringToUTF8","lengthBytesUTF8","FS"]'
 
-em++ "${COMMON[@]}" \
+# LOKJS_PROFILING_FUNCS=1 keeps function names in the wasm, for readable stacks in DevTools.
+EXTRA_LINK=()
+if [ "${LOKJS_PROFILING_FUNCS:-0}" = 1 ]; then EXTRA_LINK+=(--profiling-funcs); fi
+
+em++ "${COMMON[@]}" "${EXTRA_LINK[@]}" \
   -sTOTAL_MEMORY=1GB -sSTACK_SIZE=131072 -sDEFAULT_PTHREAD_STACK_SIZE=65536 \
   --bind -sFORCE_FILESYSTEM=1 -sWASM_BIGINT=1 -sERROR_ON_UNDEFINED_SYMBOLS=1 -sFETCH=1 \
   -sASSERTIONS=1 -sEXIT_RUNTIME=0 -sEXPORT_EXCEPTION_HANDLING_HELPERS \
