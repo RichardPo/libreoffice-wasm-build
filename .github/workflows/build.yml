@@ -257,9 +257,6 @@ jobs:
       - name: Compile and link lokjs
         run: bash build-repo/scripts/link-lokjs.sh core dist/lokjs
 
-      - name: Check exports
-        run: bash build-repo/scripts/check-exports.sh dist/lokjs/lokjs.js
-
       - name: Package
         run: |
           NAME="lokjs-${{ inputs.wasm_module }}-${{ inputs.lo_ref }}"
@@ -275,6 +272,9 @@ jobs:
         with:
           name: ${{ env.NAME }}
           path: dist/lokjs
+
+      - name: Check exports
+        run: bash build-repo/scripts/check-exports.sh dist/lokjs/lokjs.js
 
       - name: Publish release
         env:
